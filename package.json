@@ -1,0 +1,19 @@
+{
+  "name": "ft-tools",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "ft-tools": "./ft.js"
+  },
+  "scripts": {
+    "headlines": "node ft.js headlines",
+    "article": "node ft.js article"
+  },
+  "dependencies": {
+    "@playwright/mcp": "^0.0.68"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
