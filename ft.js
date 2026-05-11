@@ -16,12 +16,14 @@ function usage() {
   console.log(`Usage:
   node ft.js headlines [--limit 10] [--include-opinion] [--format json|text] [--cache-dir data] [--transport extension|cdp]
   node ft.js article (--url URL | --rank N) [--format json|text] [--cache-dir data] [--transport extension|cdp]
+  node ft.js topic --query QUERY [--limit 30] [--article-limit 5] [--include-opinion] [--format json|text] [--cache-dir data] [--transport extension|cdp]
 
 Examples:
   node ft.js headlines --limit 10
   node ft.js headlines --limit 10 --include-opinion
   node ft.js article --rank 5
-  node ft.js article --url https://www.ft.com/content/f66186e7-8e14-466d-b4de-114ee70c3e62 --format text`);
+  node ft.js article --url https://www.ft.com/content/f66186e7-8e14-466d-b4de-114ee70c3e62 --format text
+  node ft.js topic --query commodities --article-limit 5 --format text`);
 }
 
 function parseArgs(argv) {
@@ -524,36 +526,57 @@ const articleExtractor = String.raw`
 })()
 `;
 
-async function runHeadlines(args) {
+function headlineOutputFromExtracted(extracted, args = {}) {
   const limit = Number(args.limit || 10);
-  const format = args.format || 'json';
   const includeOpinion = Boolean(args['include-opinion']);
-  const cacheDir = path.resolve(args['cache-dir'] || 'data');
-  await ensureDir(cacheDir);
-
-  const browser = await connectBrowser(args);
-  try {
-    await browser.navigate(FT_HOME);
-    const extracted = await browser.evaluate(headlineExtractor);
-    const sourceStories = includeOpinion ? extracted.stories : extracted.stories.filter(story => !story.isOpinion);
-    const stories = sourceStories.slice(0, limit).map((story, index) => ({
+  const sourceStories = includeOpinion ? extracted.stories : extracted.stories.filter(story => !story.isOpinion);
+  const stories = sourceStories.slice(0, limit).map((story, index) => ({
       rank: index + 1,
       title: story.title,
       standfirst: story.standfirst,
       url: story.url,
       isOpinion: story.isOpinion,
+      texts: story.texts || [],
       top: story.top,
       left: story.left
     }));
-    const output = {
-      source: extracted.source,
-      fetchedAt: extracted.fetchedAt,
-      selectionBasis: `Distinct FT homepage /content story links sorted by visible page position, with duplicate link text folded into standfirst candidates.${includeOpinion ? ' Opinion links included.' : ' Opinion links excluded by default; pass --include-opinion to include them.'}`,
-      count: stories.length,
-      stories
-    };
-    await fs.writeFile(path.join(cacheDir, 'headlines_latest.json'), JSON.stringify(output, null, 2));
-    await fs.writeFile(path.join(cacheDir, `headlines_${todayStamp()}.json`), JSON.stringify(output, null, 2));
+  return {
+    source: extracted.source,
+    fetchedAt: extracted.fetchedAt,
+    selectionBasis: `Distinct FT homepage /content story links sorted by visible page position, with duplicate link text folded into standfirst candidates.${includeOpinion ? ' Opinion links included.' : ' Opinion links excluded by default; pass --include-opinion to include them.'}`,
+    count: stories.length,
+    stories
+  };
+}
+
+async function writeHeadlinesCache(cacheDir, output) {
+  await fs.writeFile(path.join(cacheDir, 'headlines_latest.json'), JSON.stringify(output, null, 2));
+  await fs.writeFile(path.join(cacheDir, `headlines_${todayStamp()}.json`), JSON.stringify(output, null, 2));
+}
+
+async function fetchHeadlines(browser, args) {
+  await browser.navigate(FT_HOME);
+  const extracted = await browser.evaluate(headlineExtractor);
+  return headlineOutputFromExtracted(extracted, args);
+}
+
+async function fetchArticle(browser, cacheDir, url) {
+  await browser.navigate(url);
+  const output = await browser.evaluate(articleExtractor);
+  const articlePath = path.join(cacheDir, 'articles', `${contentIdFromUrl(output.url)}.json`);
+  await fs.writeFile(articlePath, JSON.stringify(output, null, 2));
+  return output;
+}
+
+async function runHeadlines(args) {
+  const format = args.format || 'json';
+  const cacheDir = path.resolve(args['cache-dir'] || 'data');
+  await ensureDir(cacheDir);
+
+  const browser = await connectBrowser(args);
+  try {
+    const output = await fetchHeadlines(browser, args);
+    await writeHeadlinesCache(cacheDir, output);
     printHeadlines(output, format);
   } finally {
     await browser.close();
@@ -578,11 +601,82 @@ async function runArticle(args) {
 
   const browser = await connectBrowser(args);
   try {
-    await browser.navigate(url);
-    const output = await browser.evaluate(articleExtractor);
-    const articlePath = path.join(cacheDir, 'articles', `${contentIdFromUrl(output.url)}.json`);
-    await fs.writeFile(articlePath, JSON.stringify(output, null, 2));
+    const output = await fetchArticle(browser, cacheDir, url);
     printArticle(output, format);
+  } finally {
+    await browser.close();
+  }
+}
+
+function topicTerms(query) {
+  const normalized = String(query || '').toLowerCase().trim();
+  const aliases = {
+    commodities: [
+      'commodity', 'commodities', 'oil', 'crude', 'brent', 'wti', 'gas', 'lng',
+      'fuel', 'gasoline', 'diesel', 'jet fuel', 'coal', 'power', 'electricity',
+      'metals', 'copper', 'aluminium', 'iron ore', 'steel', 'gold', 'silver',
+      'agriculture', 'wheat', 'corn', 'soyabean', 'sugar', 'coffee', 'shipping',
+      'freight', 'trading desk', 'opec', 'aramco', 'hormuz'
+    ],
+    energy: [
+      'energy', 'oil', 'crude', 'brent', 'wti', 'gas', 'lng', 'fuel', 'gasoline',
+      'diesel', 'jet fuel', 'coal', 'power', 'electricity', 'opec', 'aramco',
+      'hormuz'
+    ],
+    markets: [
+      'market', 'markets', 'stocks', 'shares', 'bond', 'bonds', 'yield', 'yields',
+      'currency', 'currencies', 'dollar', 'euro', 'sterling', 'rate', 'rates',
+      'trading', 'volatility'
+    ]
+  };
+  if (aliases[normalized]) return aliases[normalized];
+  return normalized.split(/[,\s]+/).map(term => term.trim()).filter(Boolean);
+}
+
+function storyMatchesTopic(story, terms) {
+  const haystack = [
+    story.title,
+    story.standfirst,
+    ...(story.texts || [])
+  ].join(' ').toLowerCase();
+  return terms.some(term => haystack.includes(term.toLowerCase()));
+}
+
+async function runTopic(args) {
+  const query = args.query || args.topic;
+  if (!query) throw new Error('topic requires --query QUERY');
+  const format = args.format || 'json';
+  const cacheDir = path.resolve(args['cache-dir'] || 'data');
+  await ensureDir(cacheDir);
+  await ensureDir(path.join(cacheDir, 'articles'));
+
+  const articleLimit = Number(args['article-limit'] || 5);
+  const headlineLimit = Number(args.limit || 30);
+  const terms = topicTerms(query);
+  const browser = await connectBrowser(args);
+  try {
+    const headlines = await fetchHeadlines(browser, { ...args, limit: headlineLimit });
+    await writeHeadlinesCache(cacheDir, headlines);
+    const matches = headlines.stories.filter(story => storyMatchesTopic(story, terms));
+    const articles = [];
+    for (const story of matches.slice(0, articleLimit)) {
+      try {
+        articles.push({ story, article: await fetchArticle(browser, cacheDir, story.url) });
+      } catch (err) {
+        articles.push({ story, error: err.message });
+      }
+    }
+    const output = {
+      source: headlines.source,
+      fetchedAt: new Date().toISOString(),
+      query,
+      terms,
+      count: matches.length,
+      articleCount: articles.filter(item => item.article).length,
+      matches,
+      articles
+    };
+    printTopic(output, format);
   } finally {
     await browser.close();
   }
@@ -614,6 +708,30 @@ function printArticle(output, format) {
   console.log(JSON.stringify(output, null, 2));
 }
 
+function printTopic(output, format) {
+  if (format === 'text') {
+    console.log(`FT topic "${output.query}" (${output.count} matches, ${output.articleCount} articles) fetched ${output.fetchedAt}`);
+    for (const story of output.matches) {
+      console.log(`${story.rank}. ${story.title}`);
+      if (story.standfirst) console.log(`   ${story.standfirst}`);
+      console.log(`   ${story.url}`);
+      const item = output.articles.find(candidate => candidate.story.url === story.url);
+      if (item?.article) {
+        const article = item.article;
+        if (article.published) console.log(`   Published: ${article.published}`);
+        const summaryParagraphs = article.paragraphs
+          .filter(p => p && !/^Get ahead with daily markets updates\.$/i.test(p))
+          .slice(0, 4);
+        for (const paragraph of summaryParagraphs) console.log(`   ${paragraph}`);
+      } else if (item?.error) {
+        console.log(`   Article fetch failed: ${item.error}`);
+      }
+    }
+    return;
+  }
+  console.log(JSON.stringify(output, null, 2));
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const command = args._[0];
@@ -623,6 +741,7 @@ async function main() {
   }
   if (command === 'headlines') return runHeadlines(args);
   if (command === 'article') return runArticle(args);
+  if (command === 'topic') return runTopic(args);
   throw new Error(`Unknown command: ${command}`);
 }
 

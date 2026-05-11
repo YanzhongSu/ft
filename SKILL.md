@@ -17,12 +17,19 @@ Prefer the local CLI over generic browser browsing:
 cd /path/to/ft
 node ft.js headlines --limit 10 --format json
 node ft.js article --rank 5 --format json
+node ft.js topic --query commodities --limit 30 --article-limit 5 --format json
 ```
 
 Use `--format text` for a human-readable extraction.
 
 Use `--include-opinion` only when the user wants opinion/editorial links mixed
 into homepage headline results.
+
+When the user asks for latest news on a topic, prefer `topic` over running
+separate `headlines` and `article` commands. It fetches the homepage once,
+filters matching stories, and extracts matching article details sequentially
+through one browser connection. This avoids opening extra tabs and is more
+reliable than parallel article fetches through the browser bridge.
 
 ## Cache
 
